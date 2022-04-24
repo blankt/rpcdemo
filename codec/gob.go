@@ -26,17 +26,17 @@ func NewGobCodec(conn io.ReadWriteCloser) Codec {
 	}
 }
 
-//读取请求header
+//读取连接中header
 func (c *GobCodec) ReadHeader(h *Header) error {
 	return c.dec.Decode(h)
 }
 
-//读取请求body
+//读取连接中body
 func (c *GobCodec) ReadBody(body interface{}) error {
 	return c.dec.Decode(body)
 }
 
-//向返回中写入header和body
+//向连接返回中写入header和body
 func (c *GobCodec) Write(h *Header, body interface{}) (err error) {
 	defer func() {
 		_ = c.buf.Flush()

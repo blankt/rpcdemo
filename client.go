@@ -29,7 +29,7 @@ func (call *Call) done() {
 type Client struct {
 	cc       codec.Codec //编解码器
 	opt      *Option     //消息编码方式
-	sending  sync.Mutex  //保证请求有序发送
+	sending  sync.Mutex  //保证请求有序发送  防止出现多个请求报文混淆
 	header   codec.Header
 	mu       sync.Mutex // 互斥访问client
 	seq      uint64
@@ -58,19 +58,6 @@ func (client *Client) IsAvailable() bool {
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	return !client.shutdown && !client.closing
-}
-
-//注册请求
-func (client *Client) registerCall(call *Call) (uint64, error) {
-	client.mu.Lock()
-	defer client.mu.Unlock()
-	if client.closing || client.shutdown {
-		return 0, ErrShutdown
-	}
-	call.Seq = client.seq
-	client.pending[call.Seq] = call
-	client.seq++
-	return call.Seq, nil
 }
 
 //删除请求
@@ -123,6 +110,19 @@ func (client *Client) send(call *Call) {
 			call.done()
 		}
 	}
+}
+
+//注册请求
+func (client *Client) registerCall(call *Call) (uint64, error) {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if client.closing || client.shutdown {
+		return 0, ErrShutdown
+	}
+	call.Seq = client.seq
+	client.pending[call.Seq] = call
+	client.seq++
+	return call.Seq, nil
 }
 
 //接收响应
@@ -180,6 +180,25 @@ func (client *Client) Call(serviceMethod string, args, reply interface{}) error 
 	return call.Error
 }
 
+// 便于用户开启服务器地址，创建client实例  option为可选参数
+func Dial(network, address string, opts ...*Option) (client *Client, err error) {
+	opt, err := parseOptions(opts...)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := net.Dial(network, address)
+	if err != nil {
+		return nil, err
+	}
+	// 如果有误则关闭连接
+	defer func() {
+		if err != nil {
+			_ = conn.Close()
+		}
+	}()
+	return NewClient(conn, opt)
+}
+
 //初始化客户端 完成协议交换协商好消息编码方式
 func NewClient(conn net.Conn, opt *Option) (*Client, error) {
 	f := codec.NewCodecFuncMap[opt.CodecType]
@@ -207,25 +226,6 @@ func newClientCodec(cc codec.Codec, opt *Option) *Client {
 	//开启新协程接收响应
 	go client.receive()
 	return client
-}
-
-// 便于用户开启服务器地址，创建client实例  option为可选参数
-func Dial(network, address string, opts ...*Option) (client *Client, err error) {
-	opt, err := parseOptions(opts...)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := net.Dial(network, address)
-	if err != nil {
-		return nil, err
-	}
-	// 如果有误则关闭连接
-	defer func() {
-		if err != nil {
-			_ = conn.Close()
-		}
-	}()
-	return NewClient(conn, opt)
 }
 
 func parseOptions(opts ...*Option) (*Option, error) {
