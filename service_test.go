@@ -16,14 +16,16 @@ func (f Foo) Sum(args Args, reply *int) error {
 }
 
 // 非导出方法
-func (f Foo) sum(args Args, reply *int) error {
-	*reply = args.Num1 + args.Num2
-	return nil
-}
+// func (f Foo) sum(args Args, reply *int) error {
+// 	*reply = args.Num1 + args.Num2
+// 	return nil
+// }
 
 func _assert(condition bool, msg string, v ...interface{}) {
 	if !condition {
 		panic(fmt.Sprintf("assertion failed: "+msg, v...))
+	} else {
+		fmt.Println("没有发生错误")
 	}
 }
 

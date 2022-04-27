@@ -1,6 +1,7 @@
 package rpcdemo
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"rpcdemo/codec"
 	"sync"
+	"time"
 )
 
 // 实施一个rpc调用所用信息
@@ -174,30 +176,23 @@ func (client *Client) Go(serviceMethod string, args, reply interface{}, done cha
 }
 
 // 提供给用户的rpc调用接口 同步调用
-func (client *Client) Call(serviceMethod string, args, reply interface{}) error {
-	//同步调用 阻塞call.done 等待响应返回
-	call := <-client.Go(serviceMethod, args, reply, make(chan *Call, 1)).Done
-	return call.Error
+// func (client *Client) Call(serviceMethod string, args, reply interface{}) error {
+// 	//同步调用 阻塞call.done 等待响应返回
+// 	call := <-client.Go(serviceMethod, args, reply, make(chan *Call, 1)).Done
+// 	return call.Error
+// }
+//call超时处理
+func (client *Client) Call(ctx context.Context, serviceMethod string, args, reply interface{}) error {
+	call := client.Go(serviceMethod, args, reply, make(chan *Call, 1))
+	select {
+	case <-ctx.Done():
+		client.removeCall(call.Seq)
+		return errors.New("rpc client: call failed: " + ctx.Err().Error())
+	case call := <-call.Done:
+		return call.Error
+	}
 }
 
-// 便于用户开启服务器地址，创建client实例  option为可选参数
-func Dial(network, address string, opts ...*Option) (client *Client, err error) {
-	opt, err := parseOptions(opts...)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := net.Dial(network, address)
-	if err != nil {
-		return nil, err
-	}
-	// 如果有误则关闭连接
-	defer func() {
-		if err != nil {
-			_ = conn.Close()
-		}
-	}()
-	return NewClient(conn, opt)
-}
 
 //初始化客户端 完成协议交换协商好消息编码方式
 func NewClient(conn net.Conn, opt *Option) (*Client, error) {
@@ -242,3 +237,48 @@ func parseOptions(opts ...*Option) (*Option, error) {
 	}
 	return opt, nil
 }
+
+// 连接到server服务器，创建client实例  option为可选参数
+func Dial(network, address string, opts ...*Option) (client *Client, err error) {
+	return dialTimeout(NewClient, network,address,opts...)
+}
+
+type clientResult struct {
+	client *Client
+	err    error
+}
+
+type newClientFunc func (conn net.Conn,opt *Option) (client *Client,err error)
+
+func dialTimeout(f newClientFunc,network,address string,opts ...*Option) (client *Client,err error){
+    opt, err := parseOptions(opts...)
+	if err != nil {
+		return nil, err
+	}
+	conn,err := net.DialTimeout(network,address,opt.ConnectTimeout)
+	if err != nil {
+		return nil,err
+	}
+
+	defer func() {
+		if err != nil {
+			_ = conn.Close()
+		}
+	}()
+	ch := make(chan clientResult)
+	go func ()  {
+		client , err := f(conn,opt)
+		ch <- clientResult{client: client,err: err}
+	}()
+	if opt.ConnectTimeout == 0 {
+	    result := <-ch
+		return result.client,result.err
+	}
+	select {
+	case <- time.After(opt.ConnectTimeout):
+		return nil,fmt.Errorf("rpc client: connect timeout: expect within %s", opt.ConnectTimeout)
+	case result := <- ch:
+		return  result.client,result.err
+	}
+}
+
