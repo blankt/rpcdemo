@@ -1,6 +1,7 @@
 package rpcdemo
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,7 +9,9 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"rpcdemo/codec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -193,7 +196,6 @@ func (client *Client) Call(ctx context.Context, serviceMethod string, args, repl
 	}
 }
 
-
 //初始化客户端 完成协议交换协商好消息编码方式
 func NewClient(conn net.Conn, opt *Option) (*Client, error) {
 	f := codec.NewCodecFuncMap[opt.CodecType]
@@ -209,6 +211,40 @@ func NewClient(conn net.Conn, opt *Option) (*Client, error) {
 		return nil, err
 	}
 	return newClientCodec(f(conn), opt), nil
+}
+
+//在newclient上包装一层 rpcAddr http@10.0.0.1:7001, tcp@10.0.0.1:9999
+func NewHTTPClient(conn net.Conn, opt *Option) (*Client, error) {
+	_, _ = io.WriteString(conn, fmt.Sprintf("CONNECT %s HTTP/1.0\n\n", defaultRPCPath))
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})  //从连接中读取一个http回复，后一个参数表示指定回复对应的请求
+	if err == nil && resp.Status == connected {
+		return NewClient(conn, opt)
+	}
+	if err == nil {
+		err = errors.New("unexpected HTTP response")
+	}
+	return nil, err
+}
+
+//包装了一层名字
+func DialHTTP(network, address string, opts ...*Option) (*Client, error) {
+	return dialTimeout(NewHTTPClient, network, address, opts...)
+}
+
+//通过http connect建立连接之后 后续通信过程交给newclient 将处理http和rpc请求包装在一个方法
+func XDial(rpcAddr string, opts ...*Option) (*Client, error) {
+	parts := strings.Split(rpcAddr, "@")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("rpc client err: wrong format %s , expect protocol@addr", rpcAddr)
+	}
+	protocol, addr := parts[0], parts[1]
+	switch protocol {
+	case "http":
+		return DialHTTP("tcp", addr, opts...)
+	default:
+		return Dial(protocol, addr, opts...)
+	}
 }
 
 func newClientCodec(cc codec.Codec, opt *Option) *Client {
@@ -240,7 +276,7 @@ func parseOptions(opts ...*Option) (*Option, error) {
 
 // 连接到server服务器，创建client实例  option为可选参数
 func Dial(network, address string, opts ...*Option) (client *Client, err error) {
-	return dialTimeout(NewClient, network,address,opts...)
+	return dialTimeout(NewClient, network, address, opts...)
 }
 
 type clientResult struct {
@@ -248,16 +284,16 @@ type clientResult struct {
 	err    error
 }
 
-type newClientFunc func (conn net.Conn,opt *Option) (client *Client,err error)
+type newClientFunc func(conn net.Conn, opt *Option) (client *Client, err error)
 
-func dialTimeout(f newClientFunc,network,address string,opts ...*Option) (client *Client,err error){
-    opt, err := parseOptions(opts...)
+func dialTimeout(f newClientFunc, network, address string, opts ...*Option) (client *Client, err error) {
+	opt, err := parseOptions(opts...)
 	if err != nil {
 		return nil, err
 	}
-	conn,err := net.DialTimeout(network,address,opt.ConnectTimeout)
+	conn, err := net.DialTimeout(network, address, opt.ConnectTimeout)
 	if err != nil {
-		return nil,err
+		return nil, err
 	}
 
 	defer func() {
@@ -266,19 +302,18 @@ func dialTimeout(f newClientFunc,network,address string,opts ...*Option) (client
 		}
 	}()
 	ch := make(chan clientResult)
-	go func ()  {
-		client , err := f(conn,opt)
-		ch <- clientResult{client: client,err: err}
+	go func() {
+		client, err := f(conn, opt)
+		ch <- clientResult{client: client, err: err}
 	}()
 	if opt.ConnectTimeout == 0 {
-	    result := <-ch
-		return result.client,result.err
+		result := <-ch
+		return result.client, result.err
 	}
 	select {
-	case <- time.After(opt.ConnectTimeout):
-		return nil,fmt.Errorf("rpc client: connect timeout: expect within %s", opt.ConnectTimeout)
-	case result := <- ch:
-		return  result.client,result.err
+	case <-time.After(opt.ConnectTimeout):
+		return nil, fmt.Errorf("rpc client: connect timeout: expect within %s", opt.ConnectTimeout)
+	case result := <-ch:
+		return result.client, result.err
 	}
 }
-

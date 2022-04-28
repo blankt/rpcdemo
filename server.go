@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"reflect"
 	"rpcdemo/codec"
 	"strings"
@@ -17,15 +18,15 @@ import (
 const MagicNumber = 0x3bef5c
 
 type Option struct {
-	MagicNumber int        // 标识为一个rpc请求
-	CodecType   codec.Type // 客户端选择不同的方式编码传递的信息
-	ConnectTimeout time.Duration  //连接服务器超时时间和处理超时时间 0表示无限制
-	HandleTimeout time.Duration
+	MagicNumber    int           // 标识为一个rpc请求
+	CodecType      codec.Type    // 客户端选择不同的方式编码传递的信息
+	ConnectTimeout time.Duration //连接服务器超时时间和处理超时时间 0表示无限制
+	HandleTimeout  time.Duration
 }
 
 var DefaultOption = &Option{
-	MagicNumber: MagicNumber,
-	CodecType:   codec.GobType,
+	MagicNumber:    MagicNumber,
+	CodecType:      codec.GobType,
 	ConnectTimeout: time.Second * 10,
 }
 
@@ -82,7 +83,7 @@ func (server *Server) serveCodec(cc codec.Codec) {
 		}
 		wg.Add(1)
 		//并发处理请求  目前写死了超时时间
-		go server.handleRequest(cc, req, sending, wg,time.Second*10)
+		go server.handleRequest(cc, req, sending, wg, time.Second*10)
 	}
 	wg.Wait()
 	_ = cc.Close()
@@ -142,11 +143,11 @@ func (server *Server) sendResponse(cc codec.Codec, h *codec.Header, body interfa
 	}
 }
 
-func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup,timeout time.Duration) {
+func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup, timeout time.Duration) {
 	defer wg.Done()
-    called := make(chan struct{})
-    sent := make(chan struct{})
-	go func ()  {
+	called := make(chan struct{})
+	sent := make(chan struct{})
+	go func() {
 		err := req.svc.call(req.mtype, req.argv, req.replyv)
 		called <- struct{}{}
 		if err != nil {
@@ -155,19 +156,19 @@ func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.
 			sent <- struct{}{}
 			return
 		}
-	    server.sendResponse(cc, req.h, req.replyv.Interface(), sending) 
-	 	sent <- struct{}{}
+		server.sendResponse(cc, req.h, req.replyv.Interface(), sending)
+		sent <- struct{}{}
 	}()
 	if timeout == 0 {
 		<-called
-		<- sent
+		<-sent
 		return
 	}
-    select {
-	case <- time.After(timeout):
+	select {
+	case <-time.After(timeout):
 		req.h.Error = fmt.Sprintf("rpc server: request handle timeout: expect within %s", timeout)
-		server.sendResponse(cc,req.h,invalidRequest,sending)
-	case <- called:
+		server.sendResponse(cc, req.h, invalidRequest, sending)
+	case <-called:
 		<-sent
 	}
 }
@@ -219,4 +220,37 @@ func (server *Server) findService(serviceMethod string) (svc *service, mtype *me
 		err = errors.New("rpc server: can't find method " + methodName)
 	}
 	return
+}
+
+const (
+	connected        = "200 Connected to  RPCDEMO"
+	defaultRPCPath   = "/_geeprc_"
+	defaultDebugPath = "/debug/rpcdemo"
+)
+
+//自己实现了一个http接口 相当于包装了一层
+func (server *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "CONNECT" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, "405 must CONNECT\n")
+		return
+	}
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		log.Print("rpc hijacking ", req.RemoteAddr, ": ", err.Error())
+		return
+	}
+	_, _ = io.WriteString(conn, "HTTP/1.0 "+connected+"\n\n")
+	server.ServeConn(conn)
+}
+
+func (server *Server) HandleHTTP() {
+	http.Handle(defaultDebugPath, debugHTTP{server})
+	http.Handle(defaultRPCPath, server)
+	log.Println("rpc server debug path:", defaultDebugPath)
+}
+
+func HandleHTTP() {
+	DefaultServer.HandleHTTP()
 }
